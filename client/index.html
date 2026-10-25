@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>S3 Neo AI Companion</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+  html, body {
+    width: 100vw;
+    height: 100vh;
+    background-color: #000000; /* Pure black for S3 Neo Super AMOLED */
+    color: #00ffcc;
+    font-family: monospace;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+  #hud {
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    right: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    pointer-events: none;
+  }
+  .btn {
+    pointer-events: auto;
+    background: rgba(0, 255, 204, 0.08);
+    border: 1px solid #00ffcc;
+    color: #00ffcc;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .btn:active { background: #00ffcc; color: #000; }
+  #subtitle {
+    position: fixed;
+    top: 18px;
+    text-align: center;
+    width: 85%;
+    color: rgba(0, 255, 204, 0.75);
+    font-size: 15px;
+    min-height: 22px;
+  }
+</style>
+</head>
+<body>
+<div id="subtitle">Tap screen to talk to Hermes</div>
+<canvas id="faceCanvas"></canvas>
+<div id="hud">
+  <span id="statusTag">[STATE: IDLE]</span>
+  <button class="btn" id="openVoiceBtn" onclick="switchToOpenVoiceUI(event)">OpenVoiceUI (:5001)</button>
+</div>
+
+<script>
+const canvas = document.getElementById('faceCanvas');
+const ctx = canvas.getContext('2d');
+const subtitle = document.getElementById('subtitle');
+const statusTag = document.getElementById('statusTag');
+
+let state = 'idle'; // idle, listening, thinking, speaking
+let mood = 'neutral'; // neutral, happy, thinking, excited, skeptical, sleepy
+let mouthOpen = 0;
+let blinkTimer = 0;
+let isBlinking = false;
+let gazeX = 0, gazeY = 0, targetGazeX = 0, targetGazeY = 0;
+let burnInShiftX = 0, burnInShiftY = 0;
+
+// Audio & Recording
+let mediaRecorder = null;
+let audioChunks = [];
+let audioCtx = null;
+let analyser = null;
+let dataArray = null;
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// OLED Burn-in pixel shifter every 60s
+setInterval(() => {
+  burnInShiftX = (Math.random() - 0.5) * 16;
+  burnInShiftY = (Math.random() - 0.5) * 16;
+}, 60000);
+
+function switchToOpenVoiceUI(e) {
+  e.stopPropagation();
+  const host = window.location.hostname || 'localhost';
+  window.location.href = `http://${host}:5001`;
+}
+
+// Tap anywhere on the AMOLED face to toggle recording
+document.body.addEventListener('click', async () => {
+  if (state === 'idle') {
+    await startListening();
+  } else if (state === 'listening') {
+    stopListening();
+  }
+});
+
+async function startListening() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.onstop = sendAudioToServer;
+    mediaRecorder.start();
+    state = 'listening';
+    statusTag.textContent = '[STATE: LISTENING]';
+    subtitle.textContent = 'Listening... Tap again to send.';
+  } catch (err) {
+    subtitle.textContent = 'Mic error (ensure ADB reverse / localhost): ' + err.message;
+  }
+}
+
+function stopListening() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+    mediaRecorder.stream.getTracks().forEach(t => t.stop());
+    state = 'thinking';
+    mood = 'thinking';
+    statusTag.textContent = '[STATE: THINKING]';
+    subtitle.textContent = 'Hermes is thinking...';
+  }
+}
+
+async function sendAudioToServer() {
+  const blob = new Blob(audioChunks, { type: 'audio/webm' });
+  const formData = new FormData();
+  formData.append('audio', blob, 'speech.webm');
+
+  try {
+    const res = await fetch('/api/voice', { method: 'POST', body: formData });
+    const data = await res.json();
+    mood = data.mood || 'neutral';
+    subtitle.textContent = data.reply || '(No speech detected)';
+    if (data.audio) {
+      playResponseAudio(data.audio);
+    } else {
+      state = 'idle';
+      statusTag.textContent = '[STATE: IDLE]';
+    }
+  } catch (err) {
+    state = 'idle';
+    mood = 'skeptical';
+    subtitle.textContent = 'Server error: ' + err.message;
+  }
+}
+
+function playResponseAudio(base64Audio) {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const audio = new Audio("data:audio/mp3;base64," + base64Audio);
+  const source = audioCtx.createMediaElementSource(audio);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+  source.connect(analyser);
+  analyser.connect(audioCtx.destination);
+
+  state = 'speaking';
+  statusTag.textContent = `[MOOD: ${mood.toUpperCase()}]`;
+  audio.onended = () => {
+    state = 'idle';
+    mouthOpen = 0;
+    statusTag.textContent = '[STATE: IDLE]';
+  };
+  audio.play();
+}
+
+function drawRoundedRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function render(now) {
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Random eye saccades
+  if (Math.random() < 0.02) {
+    targetGazeX = (Math.random() - 0.5) * 40;
+    targetGazeY = (Math.random() - 0.5) * 20;
+  }
+  gazeX += (targetGazeX - gazeX) * 0.1;
+  gazeY += (targetGazeY - gazeY) * 0.1;
+
+  // Blinking logic
+  if (now - blinkTimer > 3500 + Math.random() * 2500) {
+    isBlinking = true;
+    blinkTimer = now;
+  }
+  if (isBlinking && now - blinkTimer > 140) {
+    isBlinking = false;
+  }
+
+  // Real-time lip-sync amplitude
+  if (state === 'speaking' && analyser && dataArray) {
+    analyser.getByteFrequencyData(dataArray);
+    let sum = 0;
+    for (let i = 2; i < 24; i++) sum += dataArray[i];
+    mouthOpen = Math.min(1, (sum / 22) / 140);
+  } else if (state === 'listening') {
+    mouthOpen = 0.15 + Math.sin(now * 0.01) * 0.08;
+  } else {
+    mouthOpen *= 0.85;
+  }
+
+  const cx = canvas.width / 2 + burnInShiftX + gazeX;
+  const cy = canvas.height / 2 + burnInShiftY + gazeY;
+  const eyeW = Math.min(canvas.width * 0.18, 130);
+  const eyeH = isBlinking ? 6 : Math.min(canvas.height * 0.28, 140);
+  const eyeSpacing = Math.min(canvas.width * 0.22, 160);
+
+  let glowColor = '#00ffcc';
+  if (state === 'listening') glowColor = '#00ff66';
+  else if (state === 'thinking') glowColor = '#ffcc00';
+  else if (mood === 'excited' || mood === 'happy') glowColor = '#00e5ff';
+  else if (mood === 'skeptical') glowColor = '#ff5500';
+
+  ctx.shadowBlur = 25;
+  ctx.shadowColor = glowColor;
+  ctx.fillStyle = glowColor;
+
+  // Left and Right Eyes
+  let leftH = eyeH;
+  let rightH = eyeH;
+  if (mood === 'skeptical' && !isBlinking) leftH *= 0.55;
+  if (mood === 'sleepy' && !isBlinking) { leftH *= 0.4; rightH *= 0.4; }
+
+  drawRoundedRect(cx - eyeSpacing - eyeW / 2, cy - leftH / 2 - 20, eyeW, leftH, 24);
+  drawRoundedRect(cx + eyeSpacing - eyeW / 2, cy - rightH / 2 - 20, eyeW, rightH, 24);
+
+  // Mouth (Audio-reactive)
+  const mouthW = eyeSpacing * 0.9;
+  const mouthH = 10 + mouthOpen * 65;
+  drawRoundedRect(cx - mouthW / 2, cy + 75 - mouthH / 2, mouthW, mouthH, 12);
+
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

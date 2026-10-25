@@ -1,0 +1,44 @@
+services:
+  s3neo-server:
+    build: ./server
+    container_name: s3neo-voice-server
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./client:/app/client:ro
+      - ./plugins:/app/plugins:ro
+      - whisper_cache:/root/.cache/huggingface
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=s3neo-hermes
+      - WHISPER_MODEL=base.en
+      - TTS_VOICE=en-US-ChristopherNeural
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: s3neo-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  openvoiceui:
+    image: ghcr.io/mcerqua/openvoiceui:latest
+    container_name: s3neo-openvoiceui
+    ports:
+      - "5001:5001"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - ./plugins:/app/custom_plugins:ro
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  whisper_cache:

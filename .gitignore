@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+models/
+ollama_data/
+whisper_cache/
+*.stl
+.DS_Store
